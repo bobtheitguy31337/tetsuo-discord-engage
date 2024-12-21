@@ -28,10 +28,6 @@ python3.11 -m venv .venv
 echo -e "${YELLOW}Activating virtual environment...${NC}"
 source .venv/bin/activate
 
-# Upgrade pip
-echo -e "${YELLOW}Upgrading pip...${NC}"
-pip install --upgrade pip
-
 # Install requirements
 echo -e "${YELLOW}Installing requirements...${NC}"
 pip install -r requirements.txt

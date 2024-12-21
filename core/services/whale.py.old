@@ -1,0 +1,105 @@
+from typing import Optional, Dict
+import asyncio
+import aiohttp
+from datetime import datetime, timezone
+
+class WhaleWatcherService:
+    """Core service for whale watching across platforms"""
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(WhaleWatcherService, cls).__new__(cls)
+            cls._instance.session = None
+            cls._instance.seen_transactions = {}
+            cls._instance.min_usd_threshold = 1000
+            cls._instance.callbacks = []
+            cls._instance.api_url = None
+            cls._instance.request_times = []
+        return cls._instance
+        
+    async def setup_session(self):
+        """Initialize shared aiohttp session"""
+        if not self.session:
+            self.session = aiohttp.ClientSession(headers={
+                'accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            })
+
+    async def add_callback(self, callback):
+        """Register a callback for trade notifications"""
+        if callback not in self.callbacks:
+            self.callbacks.append(callback)
+            
+    async def monitor_trades(self, _):  # Keep old signature for compatibility
+        """Generic trade monitoring that calls registered callbacks"""
+        if not self.session:
+            await self.setup_session()
+            
+        while True:
+            try:
+                # Clean up old request timestamps
+                current_time = datetime.now(timezone.utc)
+                self.request_times = [t for t in self.request_times 
+                                    if (current_time - t).total_seconds() < 60]
+
+                # Check if we're about to exceed rate limit
+                if len(self.request_times) >= 30:
+                    # Wait until oldest request is more than 60s old
+                    wait_time = 60 - (current_time - self.request_times[0]).total_seconds()
+                    if wait_time > 0:
+                        await asyncio.sleep(wait_time)
+                    continue
+
+                params = {
+                    'trade_volume_in_usd_greater_than': self.min_usd_threshold
+                }
+                
+                self.request_times.append(current_time)
+                
+                async with self.session.get(self.api_url, params=params) as response:
+                    if response.status == 429:  # Rate limit
+                        retry_after = int(response.headers.get('Retry-After', 30))
+                        await asyncio.sleep(retry_after)
+                        continue
+                        
+                    if response.status != 200:
+                        await asyncio.sleep(30)
+                        continue
+
+                    data = await response.json()
+                    
+                    # Process trades and call all callbacks
+                    for trade in data.get('data', []):
+                        if self._is_valid_trade(trade):
+                            trade_data = self._format_trade_data(trade)
+                            for callback in self.callbacks:
+                                try:
+                                    await callback(trade_data)
+                                except Exception as e:
+                                    print(f"Error in callback: {e}")
+                            
+                await asyncio.sleep(2)  # Base rate limiting
+                
+            except Exception as e:
+                print(f"Error monitoring trades: {e}")
+                await asyncio.sleep(30)
+
+    def _is_valid_trade(self, trade):
+        """Check if trade meets our criteria"""
+        attrs = trade['attributes']
+        return (
+            attrs['kind'] == 'buy' and
+            float(attrs['volume_in_usd']) >= self.min_usd_threshold
+        )
+
+    def _format_trade_data(self, trade):
+        """Format trade data for callbacks"""
+        attrs = trade['attributes']
+        return {
+            'transaction': attrs['tx_hash'],
+            'usd_value': float(attrs['volume_in_usd']),
+            'price_usd': float(attrs['price_to_in_usd']),
+            'amount_tokens': float(attrs['to_token_amount']),
+            'trade_time': datetime.fromisoformat(attrs['block_timestamp'].replace('Z', '+00:00'))
+        }
